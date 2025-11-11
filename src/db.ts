@@ -11,11 +11,19 @@ export async function initDB() {
 	await db.exec(`
         CREATE TABLE IF NOT EXISTS profanity_words (word TEXT PRIMARY KEY);
         CREATE TABLE IF NOT EXISTS ad_keywords (word TEXT PRIMARY KEY);
-        CREATE TABLE IF NOT EXISTS custom_words (word TEXT PRIMARY KEY); -- ✅ новая таблица
+        CREATE TABLE IF NOT EXISTS custom_words (word TEXT PRIMARY KEY);
         CREATE TABLE IF NOT EXISTS statistics (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             type TEXT,
             timestamp INTEGER
+        );
+        -- ✅ Таблица тематик нейросети
+        CREATE TABLE IF NOT EXISTS topics (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT UNIQUE,
+            description TEXT,
+            priority INTEGER,
+            enabled INTEGER DEFAULT 1
         );
     `);
 }

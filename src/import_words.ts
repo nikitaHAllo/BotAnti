@@ -1,4 +1,3 @@
-
 import sqlite3 from 'sqlite3';
 import { open } from 'sqlite';
 import dotenv from 'dotenv';
@@ -22,7 +21,6 @@ async function main() {
     );
   `);
 
-
 	const profanityWords = (process.env.PROFANITY_WORDS || '')
 		.split(',')
 		.map(w => w.trim().toLowerCase())
@@ -33,17 +31,15 @@ async function main() {
 		.map(w => w.trim().toLowerCase())
 		.filter(Boolean);
 
-	// --- Опционально: читаем слова из README.md ---
 	const readmePath = './README.md';
 	if (fs.existsSync(readmePath)) {
 		const text = fs.readFileSync(readmePath, 'utf-8');
 		const words =
 			text.match(/\b[A-Za-zА-Яа-яЁё0-9-]{2,}\b/g)?.map(w => w.toLowerCase()) ||
 			[];
-		profanityWords.push(...words); // можно фильтровать по своему regex
+		profanityWords.push(...words);
 	}
 
-	// --- Добавляем слова в базу ---
 	for (const word of profanityWords) {
 		await db.run('INSERT OR IGNORE INTO profanity_words (word) VALUES (?)', [
 			word,
@@ -53,7 +49,6 @@ async function main() {
 		await db.run('INSERT OR IGNORE INTO ad_keywords (word) VALUES (?)', [word]);
 	}
 
-	// --- Подсчет ---
 	async function getCount(table: string): Promise<number> {
 		const row = (await db.get(`SELECT COUNT(*) as c FROM ${table}`)) as
 			| { c: number }

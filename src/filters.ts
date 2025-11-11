@@ -1,6 +1,6 @@
 export let profanityWords = new Set<string>();
 export let adWords = new Set<string>();
-export let customWords = new Set<string>(); // ✅ добавлено
+export let customWords = new Set<string>();
 
 export function updateProfanity(words: string[]) {
 	profanityWords = new Set(words);
@@ -12,7 +12,6 @@ export function updateCustom(words: string[]) {
 	customWords = new Set(words);
 }
 
-// проверки
 export function checkProfanity(text: string): boolean {
 	return [...profanityWords].some(word => text.includes(word));
 }

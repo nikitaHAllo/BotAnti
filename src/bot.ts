@@ -9,109 +9,176 @@ import {
 	checkAd,
 	checkCustom,
 } from './filters.js';
-import { FILTER_PROFANITY, FILTER_ADVERTISING } from './state.js';
+import {
+	FILTER_PROFANITY,
+	FILTER_ADVERTISING,
+	USE_NEURAL_NETWORK,
+} from './state.js';
 import { registerAdminPanel, initAdminDB } from './admin.js';
-
+import { analyzeAllTopics, analyzeSequentially } from './neural.js';
+import { DELETE_MESSAGES } from './state.js';
+import axios from 'axios';
+import * as cheerio from 'cheerio';
 async function main() {
 	await initDB();
 	await initAdminDB();
 
-	// Диагностика: печатаем ADMINS чтобы убедиться, что список загружен правильно
 	console.log('ADMINS:', ADMINS);
-
 	updateCustom(await getWords('custom_words'));
 	const bot = new Bot(BOT_TOKEN);
 	registerAdminPanel(bot);
 
-	// Диагностика: проверяем, что бот корректно авторизовался
-	bot.api
-		.getMe()
-		.then(botInfo => {
-			console.log(`Запущен бот: @${botInfo.username} (id: ${botInfo.id})`);
-		})
-		.catch(err => {
-			console.error('Ошибка getMe():', err);
-		});
-
-	let isCheckingChat = false;
-
-	// === Команда /check_chat ===
-	bot.command('check_chat', async ctx => {
-		console.log(
-			'COMMAND /check_chat invoked by',
-			ctx.from?.id,
-			ctx.from?.username
-		);
-
-		if (!ctx.from || !ADMINS.includes(ctx.from.id)) {
-			console.log('-> access denied for', ctx.from?.id, 'ADMINS:', ADMINS);
-			return ctx.reply('❌ У тебя нет доступа к этой команде');
-		}
-
-		isCheckingChat = true;
-		console.log('-> check_chat enabled by', ctx.from?.id);
-		await ctx.reply(
-			'✅ Бот готов анализировать все сообщения, которые ты пришлёшь в ЛС.\n📩 Просто отправь сообщения, и я их проверю на нарушения.'
-		);
-	});
-
-	// команда для отключения режима (удобно для теста)
-	bot.command('stop_check_chat', async ctx => {
-		console.log('COMMAND /stop_check_chat invoked by', ctx.from?.id);
-		if (!ctx.from || !ADMINS.includes(ctx.from.id)) {
-			return ctx.reply('❌ У тебя нет доступа к этой команде');
-		}
-		isCheckingChat = false;
-		await ctx.reply('🛑 Режим анализа отключён.');
-	});
-
-	// === Основной обработчик сообщений ===
-	bot.on('message', async ctx => {
+	async function processDocument(ctx: any, bot: Bot) {
 		try {
-			// --- лёгкое логирование входящих сообщений для диагностики ---
-			console.log('--- incoming message ---');
-			console.log(
-				'from:',
-				ctx.from?.id,
-				ctx.from?.username,
-				ctx.from?.first_name
-			);
-			console.log('chat:', ctx.chat.id, ctx.chat.type, ctx.chat.title);
-			console.log(
-				'text:',
-				ctx.message?.text ?? '<no text>',
-				'caption:',
-				ctx.message?.caption ?? '<no caption>'
-			);
-		} catch (e) {
-			console.error('diag log error:', e);
-		}
+			console.log('🧾 processDocument вызван');
+			const file = ctx.message?.document;
+			if (!file) return;
 
-		const msgText = ctx.message.text ?? ctx.message.caption;
+			const fileName = file.file_name || 'без_имени';
+			if (!fileName.endsWith('.html') && !fileName.endsWith('.json')) {
+				await ctx.reply(
+					`⚠️ Файл ${fileName} не поддерживается. Допустимые форматы: .html, .json`
+				);
+				return;
+			}
+
+			const fileInfo = await bot.api.getFile(file.file_id);
+			if (!fileInfo.file_path) {
+				await ctx.reply(
+					'❌ Не удалось получить путь к файлу через Telegram API.'
+				);
+				return;
+			}
+
+			const fileUrl = `https://api.telegram.org/file/bot${BOT_TOKEN}/${fileInfo.file_path}`;
+			const response = await axios.get<ArrayBuffer>(fileUrl, {
+				responseType: 'arraybuffer',
+			});
+			const bodyStr = Buffer.from(response.data).toString('utf-8');
+
+			let messages: { author: string; text: string }[] = [];
+
+			if (fileName.endsWith('.json')) {
+				const data = JSON.parse(bodyStr);
+				if (Array.isArray(data.messages)) {
+					for (const msg of data.messages) {
+						if (msg.from && msg.text) {
+							let text = '';
+							if (typeof msg.text === 'string') text = msg.text;
+							else if (Array.isArray(msg.text))
+								text = msg.text
+									.map((t: any) => (typeof t === 'string' ? t : t.text))
+									.join('');
+							if (text.trim())
+								messages.push({ author: msg.from, text: text.trim() });
+						}
+					}
+				}
+			} else {
+				const $ = cheerio.load(bodyStr);
+				$('div.message').each((_, el) => {
+					const $el = $(el);
+					const author =
+						$el.find('.from_name').text().trim() ||
+						$el.find('.from').text().trim();
+					const text = $el.find('.text').text().trim();
+					if (author && text) messages.push({ author, text });
+				});
+			}
+
+			if (messages.length === 0) {
+				await ctx.reply('⚠️ Не удалось извлечь сообщения из файла.');
+				return;
+			}
+
+			await ctx.reply(
+				`✅ Файл ${fileName} загружен. Найдено сообщений: ${messages.length}`
+			);
+
+			const violationsReport: string[] = [];
+
+			for (const [index, msg] of messages.entries()) {
+				const text = msg.text.toLowerCase();
+				let violation: string | null = null;
+
+				if (USE_NEURAL_NETWORK && text.length > 3) {
+					try {
+						const neuralViolation = await analyzeSequentially(text);
+						if (neuralViolation) violation = `neural_${neuralViolation.topic}`;
+					} catch {}
+				}
+
+				if (!violation) {
+					if (FILTER_PROFANITY && checkProfanity(text))
+						violation = 'violation_profanity';
+					if (FILTER_ADVERTISING && checkAd(text)) violation = 'violation_ad';
+					if (checkCustom(text)) violation = 'violation_custom';
+				}
+
+				if (violation) {
+					violationsReport.push(
+						`${index + 1}. 👤 *${msg.author}*\n⚠️ *${getViolationReason(
+							violation
+						)}*\n💬 "${msg.text}"`
+					);
+				}
+			}
+
+			if (violationsReport.length > 0) {
+				const chunkSize = 4000;
+				let chunkText = '';
+				for (const line of violationsReport) {
+					if ((chunkText + '\n\n' + line).length > chunkSize) {
+						await ctx.reply(chunkText, { parse_mode: 'Markdown' });
+						chunkText = line;
+					} else {
+						chunkText += (chunkText ? '\n\n' : '') + line;
+					}
+				}
+				if (chunkText) await ctx.reply(chunkText, { parse_mode: 'Markdown' });
+			} else {
+				await ctx.reply(`✅ В файле ${fileName} нарушений не найдено.`);
+			}
+		} catch (error: any) {
+			console.error('❌ Ошибка в processDocument:', error);
+			try {
+				await ctx.reply('❌ Ошибка при анализе файла.');
+			} catch {}
+		}
+	}
+
+	async function checkBotPermissions(chatId: number): Promise<boolean> {
+		try {
+			const chatMember = await bot.api.getChatMember(
+				chatId,
+				(
+					await bot.api.getMe()
+				).id
+			);
+			if (chatMember.status === 'administrator') {
+				const permissions = (chatMember as any).can_delete_messages;
+				return permissions === true;
+			}
+			return false;
+		} catch (error) {
+			console.log('Бот не админ в чате:', chatId);
+			return false;
+		}
+	}
+
+	async function handleViolation(ctx: any, violationType: string) {
 		const chatId = ctx.chat.id;
-
-		// Проверка на разрешённые чаты
-		if (ctx.chat.type !== 'private') {
-			if (ALLOWED_CHATS.length > 0 && !ALLOWED_CHATS.includes(chatId)) return;
-		}
-
-		const text = msgText?.toLowerCase() || '';
-		let violation: string | null = null;
-
-		// Проверка фильтров
-		if (FILTER_PROFANITY && checkProfanity(text))
-			violation = 'violation_profanity';
-		if (FILTER_ADVERTISING && checkAd(text)) violation = 'violation_ad';
-		if (checkCustom(text)) violation = 'violation_custom';
+		const messageId = ctx.message.message_id;
+		const userId = ctx.from.id;
+		const text = ctx.message.text || ctx.message.caption || '';
 
 		const db = await dbPromise;
 		await db.run('INSERT INTO statistics (type,timestamp) VALUES (?,?)', [
-			violation || 'message_ok',
+			violationType,
 			Math.floor(Date.now() / 1000),
 		]);
 
-		// === Логирование нарушений ===
-		if (violation && LOG_CHAT_ID) {
+		if (LOG_CHAT_ID) {
 			try {
 				await bot.api.sendMessage(
 					LOG_CHAT_ID,
@@ -119,57 +186,163 @@ async function main() {
 						ctx.chat.title || 'ЛС'
 					})\n👤 Пользователь: ${
 						ctx.from?.username ? '@' + ctx.from.username : ctx.from?.first_name
-					} (${ctx.from?.id})\nТип нарушения: ${violation}\nТекст: ${
-						ctx.message.text ?? ctx.message.caption ?? '<no text>'
-					}`
+					} (${userId})\nТип нарушения: ${violationType}\nТекст: ${text}`
 				);
-				await bot.api.forwardMessage(
-					LOG_CHAT_ID,
-					chatId,
-					ctx.message.message_id
-				);
+				await bot.api.forwardMessage(LOG_CHAT_ID, chatId, messageId);
 			} catch (err) {
 				console.error('Ошибка при логировании нарушения:', err);
 			}
 		}
 
-		// === Режим анализа /check_chat ===
-		if (isCheckingChat && ctx.from && ADMINS.includes(ctx.from.id)) {
-			const checkText = (
-				ctx.message.text ??
-				ctx.message.caption ??
-				''
-			).toLowerCase();
-			if (!checkText) {
-				await ctx.reply('⚠️ Пустое сообщение — текст или подпись отсутствуют.');
-				return;
-			}
+		try {
+			const isAdmin = await checkBotPermissions(chatId);
 
-			let checkViolation: string | null = null;
-
-			if (checkProfanity(checkText)) checkViolation = 'violation_profanity';
-			if (checkAd(checkText)) checkViolation = 'violation_ad';
-			if (checkCustom(checkText)) checkViolation = 'violation_custom';
-
-			if (checkViolation) {
-				await db.run('INSERT INTO statistics (type,timestamp) VALUES (?,?)', [
-					checkViolation,
-					Math.floor(Date.now() / 1000),
-				]);
-
-				// отправляем лог в LOG_CHAT_ID (если указан)
-				if (LOG_CHAT_ID) {
-					await ctx.api.sendMessage(
-						LOG_CHAT_ID,
-						`🚨 Нарушение (анализ сообщений после /check_chat)!\n👤 Пользователь: ${
-							ctx.from?.username
-								? '@' + ctx.from.username
-								: ctx.from?.first_name
-						}\nТекст: ${checkText}\nТип: ${checkViolation}`
+			if (isAdmin && ctx.chat.type !== 'private') {
+				if (DELETE_MESSAGES) {
+					const warning = await ctx.reply(
+						`⚠️ Сообщение от @${
+							ctx.from.username || ctx.from.first_name
+						} удалено.\nПричина: ${getViolationReason(violationType)}`
+					);
+					await bot.api.deleteMessage(chatId, messageId);
+					setTimeout(async () => {
+						try {
+							await bot.api.deleteMessage(chatId, warning.message_id);
+						} catch {}
+					}, 10000);
+				} else {
+					console.log(
+						`🚫 Нарушение у @${
+							ctx.from.username || ctx.from.first_name
+						}, но автоудаление отключено (${getViolationReason(violationType)})`
 					);
 				}
+			} else if (ctx.chat.type === 'private') {
+				await ctx.reply(
+					`❌ Ваше сообщение содержит запрещённый контент. Причина: ${getViolationReason(
+						violationType
+					)}`
+				);
+			}
+		} catch (error) {
+			console.error('Ошибка при обработке нарушения:', error);
+		}
+	}
+
+	function getViolationReason(type: string): string {
+		const reasons = {
+			violation_profanity: 'ненормативная лексика',
+			violation_ad: 'реклама',
+			violation_custom: 'запрещенные слова',
+			neural_bad_words: 'нежелательный контент (нейросеть)',
+			neural_cars: 'автомобильная тема (нейросеть)',
+			neural_advertising: 'реклама (нейросеть)',
+		};
+		return reasons[type as keyof typeof reasons] || 'нарушение правил';
+	}
+
+	let isCheckingChat = false;
+
+	bot.command('check_chat', async ctx => {
+		if (!ctx.from || !ADMINS.includes(ctx.from.id))
+			return ctx.reply('❌ У тебя нет доступа к этой команде');
+		isCheckingChat = true;
+		await ctx.reply(
+			'✅ Бот готов анализировать все сообщения, которые ты пришлёшь в ЛС.'
+		);
+	});
+
+	bot.command('stop_check_chat', async ctx => {
+		if (!ctx.from || !ADMINS.includes(ctx.from.id))
+			return ctx.reply('❌ У тебя нет доступа к этой команде');
+		isCheckingChat = false;
+		await ctx.reply('🛑 Режим анализа отключён.');
+	});
+
+	bot.command('check_permissions', async ctx => {
+		if (!ctx.from || !ADMINS.includes(ctx.from.id))
+			return ctx.reply('❌ У тебя нет доступа к этой команде');
+		if (ctx.chat.type === 'private')
+			return ctx.reply('ℹ️ Эта команда работает только в группах и каналах');
+
+		const hasPermissions = await checkBotPermissions(ctx.chat.id);
+		if (hasPermissions)
+			await ctx.reply('✅ Бот имеет необходимые права администратора');
+		else
+			await ctx.reply(
+				'❌ Бот не имеет прав администратора или прав недостаточно. Требуются права на удаление сообщений.'
+			);
+	});
+
+	bot.on('message', async ctx => {
+		const msgText = ctx.message.text ?? ctx.message.caption ?? '';
+
+		if (ctx.message.document) {
+			console.log('🔔 Обнаружен document — запускаем processDocument');
+			await processDocument(ctx, bot);
+			return;
+		}
+
+		const text = msgText.toLowerCase();
+		let violation: string | null = null;
+
+		if (USE_NEURAL_NETWORK && text.length > 3) {
+			try {
+				const neuralViolation = await analyzeSequentially(text);
+				if (neuralViolation) violation = `neural_${neuralViolation.topic}`;
+			} catch (e) {
+				console.error('Ошибка нейросети:', e);
 			}
 		}
+
+		if (!violation) {
+			if (FILTER_PROFANITY && checkProfanity(text))
+				violation = 'violation_profanity';
+			if (FILTER_ADVERTISING && checkAd(text)) violation = 'violation_ad';
+			if (checkCustom(text)) violation = 'violation_custom';
+		}
+
+		if (violation) await handleViolation(ctx, violation);
+		else {
+			const db = await dbPromise;
+			await db.run('INSERT INTO statistics (type,timestamp) VALUES (?,?)', [
+				'message_ok',
+				Math.floor(Date.now() / 1000),
+			]);
+		}
+
+		if (
+			isCheckingChat &&
+			ctx.from &&
+			ADMINS.includes(ctx.from.id) &&
+			ctx.chat.type === 'private'
+		) {
+			if (!text) return ctx.reply('⚠️ Пустое сообщение — текст отсутствует.');
+			let checkViolation: string | null = null;
+			try {
+				const neuralResults = await analyzeAllTopics(text);
+				const neuralViolation = neuralResults.find(r => r.detected);
+				if (neuralViolation) checkViolation = `neural_${neuralViolation.topic}`;
+			} catch {}
+			if (!checkViolation) {
+				if (checkProfanity(text)) checkViolation = 'violation_profanity';
+				if (checkAd(text)) checkViolation = 'violation_ad';
+				if (checkCustom(text)) checkViolation = 'violation_custom';
+			}
+			if (checkViolation)
+				await ctx.reply(
+					`🚨 Обнаружено нарушение: ${getViolationReason(checkViolation)}`
+				);
+			else await ctx.reply('✅ Нарушений не обнаружено');
+		}
+	});
+
+	bot.on('message:new_chat_members', async ctx => {
+		// Можно добавить приветственное сообщение с правилами
+	});
+
+	bot.catch(err => {
+		console.error('Ошибка бота:', err);
 	});
 
 	bot.start();
