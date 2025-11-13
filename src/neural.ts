@@ -43,7 +43,8 @@ export interface NeuralResult {
 // Основная функция анализа
 export async function analyzeWithNeural(
 	message: string,
-	topicName: string
+	topicName: string,
+	signal?: AbortSignal
 ): Promise<NeuralResult> {
 	try {
 		const topic = TOPICS.find(t => t.name === topicName);
@@ -62,24 +63,17 @@ export async function analyzeWithNeural(
 			{
 				model: currentModel,
 				messages: [
-					{
-						role: 'system',
-						content: topic.systemPrompt,
-					},
-					{
-						role: 'user',
-						content: `Сообщение для анализа: "${message}"`,
-					},
+					{ role: 'system', content: topic.systemPrompt },
+					{ role: 'user', content: `Сообщение для анализа: "${message}"` },
 				],
 				temperature: 0.1,
 				max_tokens: 50,
 			},
 			{
 				timeout: 15000,
-				headers: {
-					'Content-Type': 'application/json',
-				},
-			}
+				headers: { 'Content-Type': 'application/json' },
+				...(signal ? { signal } : {}), // ✅ безопасно добавляем, если есть
+			} as any // ✅ подавляем TS-ошибку
 		);
 
 		// Безопасное извлечение данных с проверками
@@ -139,7 +133,8 @@ export async function analyzeWithNeural(
 }
 
 export async function analyzeSequentially(
-	message: string
+	message: string,
+	signal?: AbortSignal
 ): Promise<NeuralResult | null> {
 	// Сортируем темы по приоритету (от высшего к низшему)
 	const sortedTopics = [...TOPICS]
@@ -147,7 +142,8 @@ export async function analyzeSequentially(
 		.sort((a, b) => a.priority - b.priority);
 
 	for (const topic of sortedTopics) {
-		const result = await analyzeWithNeural(message, topic.name);
+		if (signal?.aborted) throw new Error('cancelled'); // 👈 проверка отмены
+		const result = await analyzeWithNeural(message, topic.name, signal);
 
 		if (result.detected) {
 			console.log(

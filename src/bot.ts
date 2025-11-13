@@ -19,6 +19,12 @@ import { analyzeAllTopics, analyzeSequentially } from './neural.js';
 import { DELETE_MESSAGES } from './state.js';
 import axios from 'axios';
 import * as cheerio from 'cheerio';
+import { InlineKeyboard } from 'grammy';
+// Глобальная карта активных анализов
+const activeAnalyses = new Map<
+	number,
+	{ cancel: boolean; controller: AbortController }
+>();
 async function main() {
 	await initDB();
 	await initAdminDB();
@@ -91,36 +97,112 @@ async function main() {
 				return;
 			}
 
+			const chatId = ctx.chat.id;
+
+			if (activeAnalyses.has(chatId)) {
+				await ctx.reply(
+					'⚠️ Анализ уже выполняется. Отмени его или дождись завершения.'
+				);
+				return;
+			}
+
+			const controller = new AbortController();
+			activeAnalyses.set(chatId, { cancel: false, controller });
+
+			const cancelKeyboard = new InlineKeyboard().text(
+				'🛑 Отменить анализ',
+				`cancel_${chatId}`
+			);
 			await ctx.reply(
-				`✅ Файл ${fileName} загружен. Найдено сообщений: ${messages.length}`
+				`✅ Файл ${fileName} загружен. Найдено сообщений: ${messages.length}`,
+				{
+					reply_markup: cancelKeyboard,
+				}
 			);
 
 			const violationsReport: string[] = [];
 
+			// вспомогательная функция для проверки отмены
+			const checkCancelled = () => {
+				const analysis = activeAnalyses.get(chatId);
+				if (!analysis || analysis.cancel) throw new Error('cancelled');
+			};
+
 			for (const [index, msg] of messages.entries()) {
-				const text = msg.text.toLowerCase();
-				let violation: string | null = null;
+				try {
+					checkCancelled();
 
-				if (USE_NEURAL_NETWORK && text.length > 3) {
-					try {
-						const neuralViolation = await analyzeSequentially(text);
-						if (neuralViolation) violation = `neural_${neuralViolation.topic}`;
-					} catch {}
-				}
+					const text = msg.text.toLowerCase();
+					let violation: string | null = null;
 
-				if (!violation) {
-					if (FILTER_PROFANITY && checkProfanity(text))
-						violation = 'violation_profanity';
-					if (FILTER_ADVERTISING && checkAd(text)) violation = 'violation_ad';
-					if (checkCustom(text)) violation = 'violation_custom';
-				}
+					// Анализ нейросетью с возможностью прерывания
+					if (USE_NEURAL_NETWORK && text.length > 3) {
+						try {
+							const neuralViolation = await analyzeSequentially(
+								text,
+								controller.signal
+							);
 
-				if (violation) {
+							if (neuralViolation && typeof neuralViolation === 'object') {
+								violation = `neural_${neuralViolation.topic}`;
+							}
+						} catch (err) {
+							if (err instanceof Error && err.message === 'cancelled') {
+								await ctx.reply('🛑 Анализ прерван пользователем.');
+								activeAnalyses.delete(chatId);
+								return;
+							} else {
+								console.error('Ошибка нейросети:', err);
+							}
+						}
+					}
+
+					// Проверки фильтров
+					if (!violation) {
+						if (FILTER_PROFANITY && checkProfanity(text))
+							violation = 'violation_profanity';
+						if (FILTER_ADVERTISING && checkAd(text)) violation = 'violation_ad';
+						if (checkCustom(text)) violation = 'violation_custom';
+					}
+
+					function escapeMarkdownV2(str = '') {
+						return str.replace(/([_*[\]()~`>#+\-=|{}.!])/g, '\\$1');
+					}
+
 					violationsReport.push(
-						`${index + 1}. 👤 *${msg.author}*\n⚠️ *${getViolationReason(
-							violation
-						)}*\n💬 "${msg.text}"`
+						`${index + 1}\\. 👤 *${escapeMarkdownV2(msg.author)}*\n` +
+							`⚠️ *${escapeMarkdownV2(getViolationReason(violation))}*\n` +
+							`💬 "${escapeMarkdownV2(msg.text)}"`
 					);
+
+					if (index % 20 === 0) {
+						await ctx.reply(
+							`📊 Проверено ${index + 1} из ${messages.length} сообщений...`
+						);
+					}
+				} catch (err) {
+					if (err instanceof Error && err.message === 'cancelled') {
+						await ctx.reply('🛑 Анализ прерван пользователем.');
+						activeAnalyses.delete(chatId);
+						return;
+					} else {
+						console.error('Ошибка при обработке сообщения:', err);
+					}
+				}
+			}
+
+			activeAnalyses.delete(chatId);
+			await ctx.reply('✅ Анализ завершён.');
+
+			async function safeReply(
+				ctx: { reply: (arg0: string, arg1: { parse_mode: string }) => any },
+				text: string | undefined
+			) {
+				const MAX_LENGTH = 4000;
+				const safeText = text ?? '';
+				for (let i = 0; i < safeText.length; i += MAX_LENGTH) {
+					const chunk = safeText.slice(i, i + MAX_LENGTH);
+					await ctx.reply(chunk, { parse_mode: 'MarkdownV2' });
 				}
 			}
 
@@ -129,13 +211,13 @@ async function main() {
 				let chunkText = '';
 				for (const line of violationsReport) {
 					if ((chunkText + '\n\n' + line).length > chunkSize) {
-						await ctx.reply(chunkText, { parse_mode: 'Markdown' });
+						await safeReply(ctx, chunkText);
 						chunkText = line;
 					} else {
 						chunkText += (chunkText ? '\n\n' : '') + line;
 					}
 				}
-				if (chunkText) await ctx.reply(chunkText, { parse_mode: 'Markdown' });
+				if (chunkText) await safeReply(ctx, chunkText);
 			} else {
 				await ctx.reply(`✅ В файле ${fileName} нарушений не найдено.`);
 			}
@@ -229,8 +311,9 @@ async function main() {
 		}
 	}
 
-	function getViolationReason(type: string): string {
-		const reasons = {
+	function getViolationReason(type: string | null): string {
+		if (!type) return 'нарушение правил';
+		const reasons: Record<string, string> = {
 			violation_profanity: 'ненормативная лексика',
 			violation_ad: 'реклама',
 			violation_custom: 'запрещенные слова',
@@ -238,7 +321,7 @@ async function main() {
 			neural_cars: 'автомобильная тема (нейросеть)',
 			neural_advertising: 'реклама (нейросеть)',
 		};
-		return reasons[type as keyof typeof reasons] || 'нарушение правил';
+		return reasons[type] || 'нарушение правил';
 	}
 
 	let isCheckingChat = false;
@@ -273,8 +356,31 @@ async function main() {
 				'❌ Бот не имеет прав администратора или прав недостаточно. Требуются права на удаление сообщений.'
 			);
 	});
+	bot.on('callback_query:data', async ctx => {
+		const data = ctx.callbackQuery?.data;
+		if (!data) return;
+
+		if (data.startsWith('cancel_')) {
+			const chatId = Number(data.split('_')[1]);
+			const analysis = activeAnalyses.get(chatId);
+
+			if (analysis && !analysis.cancel) {
+				analysis.cancel = true;
+				analysis.controller?.abort(); // 👈 реально прерывает axios.post
+				await ctx.answerCallbackQuery({ text: '⏹ Анализ остановлен.' });
+				await ctx.editMessageText('🛑 Анализ отменён пользователем.');
+				activeAnalyses.delete(chatId); // 👈 чтобы не оставались “висячие” анализы
+			} else {
+				await ctx.answerCallbackQuery({
+					text: '⚠️ Анализ не выполняется.',
+					show_alert: false,
+				});
+			}
+		}
+	});
 
 	bot.on('message', async ctx => {
+		const chatId = ctx.chat.id;
 		const msgText = ctx.message.text ?? ctx.message.caption ?? '';
 
 		if (ctx.message.document) {
@@ -290,8 +396,18 @@ async function main() {
 			try {
 				const neuralViolation = await analyzeSequentially(text);
 				if (neuralViolation) violation = `neural_${neuralViolation.topic}`;
-			} catch (e) {
-				console.error('Ошибка нейросети:', e);
+			} catch (err: unknown) {
+				if (err instanceof Error) {
+					if (err.message === 'cancelled') {
+						await ctx.reply('🛑 Анализ прерван пользователем.');
+						activeAnalyses.delete(chatId);
+						return;
+					} else {
+						console.error('Ошибка нейросети:', err);
+					}
+				} else {
+					console.error('Неизвестная ошибка:', err);
+				}
 			}
 		}
 
