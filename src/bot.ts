@@ -169,11 +169,13 @@ async function main() {
 						return str.replace(/([_*[\]()~`>#+\-=|{}.!])/g, '\\$1');
 					}
 
-					violationsReport.push(
-						`${index + 1}\\. 👤 *${escapeMarkdownV2(msg.author)}*\n` +
-							`⚠️ *${escapeMarkdownV2(getViolationReason(violation))}*\n` +
-							`💬 "${escapeMarkdownV2(msg.text)}"`
-					);
+					if (violation) {
+						violationsReport.push(
+							`${index + 1}\\. 👤 *${escapeMarkdownV2(msg.author)}*\n` +
+								`⚠️ *${escapeMarkdownV2(getViolationReason(violation))}*\n` +
+								`💬 "${escapeMarkdownV2(msg.text)}"`
+						);
+					}
 
 					if (index % 20 === 0) {
 						await ctx.reply(
@@ -384,6 +386,23 @@ async function main() {
 		const msgText = ctx.message.text ?? ctx.message.caption ?? '';
 
 		if (ctx.message.document) {
+			const fromId = ctx.from?.id;
+			const isAdminUser = typeof fromId === 'number' && ADMINS.includes(fromId);
+			const isAllowedChat =
+				ALLOWED_CHATS.length === 0 || ALLOWED_CHATS.includes(chatId);
+
+			if (ctx.chat.type === 'private' && !isAdminUser) {
+				await ctx.reply('❌ Анализ файлов доступен только администраторам.');
+				return;
+			}
+
+			if (!isAdminUser && !isAllowedChat) {
+				await ctx.reply(
+					'❌ Этот чат не входит в список разрешённых для анализа файлов.'
+				);
+				return;
+			}
+
 			console.log('🔔 Обнаружен document — запускаем processDocument');
 			await processDocument(ctx, bot);
 			return;
