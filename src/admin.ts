@@ -132,7 +132,6 @@ function neuralTopicsKeyboard() {
 	return keyboard;
 }
 
-
 export function registerAdminPanel(bot: Bot<Context>) {
 	bot.command('start', async ctx => {
 		await ctx.reply('Бот запущен, откройте панель администратора - /admin');
@@ -183,23 +182,6 @@ export function registerAdminPanel(bot: Bot<Context>) {
 				await ctx.editMessageText(
 					`Нейросеть: ${toggleNeuralNetwork() ? '✅ Вкл' : '❌ Выкл'}`,
 					{ reply_markup: backToAdminKeyboard() }
-				);
-				break;
-
-			case 'neural_topics':
-				const sortedTopics = getTopicsByPriority();
-				const topicsText = sortedTopics
-					.map(
-						(topic: any) =>
-							`• ${topic.name}: ${topic.enabled ? '✅' : '❌'} (приоритет: ${
-								topic.priority
-							})`
-					)
-					.join('\n');
-
-				await ctx.editMessageText(
-					`🧠 Управление тематиками (проверяются последовательно):\n\n${topicsText}\n\nНажмите на тему чтобы включить/выключить:`,
-					{ reply_markup: neuralTopicsKeyboard() }
 				);
 				break;
 
@@ -345,7 +327,6 @@ export function registerAdminPanel(bot: Bot<Context>) {
 						}
 					}
 				}
-
 
 				if (data.startsWith('model_')) {
 					const modelId = data.replace('model_', '');

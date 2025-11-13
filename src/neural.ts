@@ -66,7 +66,7 @@ export async function analyzeWithNeural(
 					{ role: 'system', content: topic.systemPrompt },
 					{ role: 'user', content: `Сообщение для анализа: "${message}"` },
 				],
-				temperature: 0.1,
+				temperature: 0,
 				max_tokens: 50,
 			},
 			{
@@ -103,11 +103,26 @@ export async function analyzeWithNeural(
 			return { topic: topicName, detected: false };
 		}
 
-		const answer = content.trim().toUpperCase();
-		const detected = answer.includes('ДА');
+		const answer = content.trim();
+		const numberMatch = answer.match(/-?\d+(?:[.,]\d+)?/);
+		let confidence = numberMatch
+			? Number.parseFloat(numberMatch[0].replace(',', '.'))
+			: NaN;
+
+		if (!Number.isFinite(confidence)) {
+			console.warn(
+				`Нейросеть вернула некорректное значение уверенности для темы "${topicName}":`,
+				answer
+			);
+			confidence = 0;
+		}
+
+		confidence = Math.min(100, Math.max(0, confidence));
+		const detected = confidence > 80;
 
 		console.log(`🧠 Результат нейросети [${topicName}]:`, {
 			answer: content,
+			confidence,
 			detected,
 			finish_reason: data.choices?.[0]?.finish_reason,
 		});
@@ -115,6 +130,7 @@ export async function analyzeWithNeural(
 		return {
 			topic: topicName,
 			detected,
+			confidence,
 			reason: content,
 		};
 	} catch (error: any) {
