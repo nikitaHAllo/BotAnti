@@ -28,7 +28,6 @@ export async function initDB() {
     `);
 }
 
-
 export async function addWord(
 	table: 'profanity_words' | 'ad_keywords' | 'custom_words',
 	word: string

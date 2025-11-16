@@ -1,8 +1,8 @@
-export let FILTER_PROFANITY = true;
-export let FILTER_ADVERTISING = true;
+export let FILTER_PROFANITY = false;
+export let FILTER_ADVERTISING = false;
 export let USE_NEURAL_NETWORK = true;
-export let CURRENT_MODEL = 'qwen2.5-coder:7b';
-export let DELETE_MESSAGES = true;
+export let CURRENT_MODEL = 'hf.co/unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M';
+export let DELETE_MESSAGES = false;
 
 export function toggleProfanity(): boolean {
 	FILTER_PROFANITY = !FILTER_PROFANITY;

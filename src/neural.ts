@@ -1,5 +1,6 @@
 import axios from 'axios';
 import { getCurrentModel } from './state';
+import { dbPromise } from './db.js';
 
 const NEURAL_API_URL = 'http://10.8.0.24:11434/v1/chat/completions';
 
@@ -10,7 +11,6 @@ export const AVAILABLE_MODELS = [
 	'hf.co/unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M',
 ];
 
-// Упрощенные типы или используем any для избежания ошибок
 interface NeuralApiResponse {
 	choices?: Array<{
 		message?: {
@@ -20,7 +20,6 @@ interface NeuralApiResponse {
 	}>;
 }
 
-// Настройки тематик
 export interface TopicConfig {
 	name: string;
 	systemPrompt: string;
@@ -29,10 +28,8 @@ export interface TopicConfig {
 	enabled: boolean;
 }
 
-// Конфигурация тематик
 export const TOPICS: TopicConfig[] = [];
 
-// Результат анализа
 export interface NeuralResult {
 	topic: string;
 	detected: boolean;
@@ -40,7 +37,6 @@ export interface NeuralResult {
 	reason?: string;
 }
 
-// Основная функция анализа
 export async function analyzeWithNeural(
 	message: string,
 	topicName: string,
@@ -57,7 +53,6 @@ export async function analyzeWithNeural(
 			message.substring(0, 100)
 		);
 
-		// Используем any для response data чтобы избежать проблем с типами
 		const response = await axios.post(
 			NEURAL_API_URL,
 			{
@@ -72,26 +67,21 @@ export async function analyzeWithNeural(
 			{
 				timeout: 15000,
 				headers: { 'Content-Type': 'application/json' },
-				...(signal ? { signal } : {}), // ✅ безопасно добавляем, если есть
-			} as any // ✅ подавляем TS-ошибку
+				...(signal ? { signal } : {}),
+			} as any
 		);
 
-		// Безопасное извлечение данных с проверками
 		const data = response.data as any;
 
 		console.log('🧠 Полный ответ нейросети:', JSON.stringify(data, null, 2));
 
-		// Проверяем разные возможные структуры ответа
 		let content: string | undefined;
 
 		if (data.choices && Array.isArray(data.choices) && data.choices[0]) {
-			// Стандартная структура OpenAI
 			content = data.choices[0]?.message?.content;
 		} else if (data.response) {
-			// Альтернативная структура
 			content = data.response;
 		} else if (data.content) {
-			// Другая возможная структура
 			content = data.content;
 		} else {
 			console.warn('Неизвестная структура ответа нейросети:', data);
@@ -152,13 +142,14 @@ export async function analyzeSequentially(
 	message: string,
 	signal?: AbortSignal
 ): Promise<NeuralResult | null> {
-	// Сортируем темы по приоритету (от высшего к низшему)
 	const sortedTopics = [...TOPICS]
 		.filter(topic => topic.enabled)
 		.sort((a, b) => a.priority - b.priority);
 
 	for (const topic of sortedTopics) {
-		if (signal?.aborted) throw new Error('cancelled'); // 👈 проверка отмены
+		if (signal?.aborted) {
+			throw new Error('cancelled');
+		}
 		const result = await analyzeWithNeural(message, topic.name, signal);
 
 		if (result.detected) {
@@ -169,10 +160,9 @@ export async function analyzeSequentially(
 		}
 	}
 
-	return null; // Нарушений не обнаружено
+	return null;
 }
 
-// Массовый анализ по всем темам
 export async function analyzeAllTopics(
 	message: string
 ): Promise<NeuralResult[]> {
@@ -183,13 +173,9 @@ export async function analyzeAllTopics(
 	return Promise.all(promises);
 }
 
-// Получить активные темы
 export function getActiveTopics(): TopicConfig[] {
 	return TOPICS.filter(topic => topic.enabled);
 }
-
-// Включить/выключить тему
-import { dbPromise } from './db.js';
 
 export async function toggleTopic(
 	topicName: string,

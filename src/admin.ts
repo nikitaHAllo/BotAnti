@@ -132,7 +132,6 @@ function neuralTopicsKeyboard() {
 	return keyboard;
 }
 
-
 export function registerAdminPanel(bot: Bot<Context>) {
 	bot.command('start', async ctx => {
 		await ctx.reply('Бот запущен, откройте панель администратора - /admin');
@@ -149,39 +148,37 @@ export function registerAdminPanel(bot: Bot<Context>) {
 		});
 	});
 
-	// Обрабатываем только админские callback'и
 	bot.on('callback_query:data', async (ctx, next) => {
 		const data = ctx.callbackQuery?.data;
-		console.log(`🔔 [admin.ts] Получен callback_query: ${data}`);
-		
+
 		if (!ctx.from || !ADMINS.includes(ctx.from.id)) {
-			console.log(`⚠️ [admin.ts] Пользователь не админ, передаю дальше`);
-			return next(); // Передаем следующему обработчику
+			return next();
 		}
 
 		if (!data) {
-			console.log(`⚠️ [admin.ts] Callback data пустой, передаю дальше`);
-			return next(); // Передаем следующему обработчику
+			return next();
 		}
 
-		// Если callback не относится к админ-панели, пропускаем его для других обработчиков
 		const adminCallbacks = [
-			'toggle_delete', 'toggle_profanity', 'toggle_ad', 'toggle_neural',
-			'neural_models', 'show_statistics', 'list_words', 'show_commands',
-			'back_to_admin', 'neural_topics'
+			'toggle_delete',
+			'toggle_profanity',
+			'toggle_ad',
+			'toggle_neural',
+			'neural_models',
+			'show_statistics',
+			'list_words',
+			'show_commands',
+			'back_to_admin',
+			'neural_topics',
 		];
-		const isAdminCallback = adminCallbacks.includes(data) || 
-			data.startsWith('topic_') || 
+		const isAdminCallback =
+			adminCallbacks.includes(data) ||
+			data.startsWith('topic_') ||
 			data.startsWith('model_');
-		
+
 		if (!isAdminCallback) {
-			// Это не админский callback (например, analyze_limit_ или cancel_), 
-			// пропускаем для обработки в bot.ts
-			console.log(`⏭️ [admin.ts] Это не админский callback, передаю в bot.ts`);
-			return next(); // Передаем следующему обработчику
+			return next();
 		}
-		
-		console.log(`✅ [admin.ts] Обрабатываю админский callback: ${data}`);
 
 		const db = await dbPromise;
 
@@ -321,7 +318,7 @@ export function registerAdminPanel(bot: Bot<Context>) {
 
 				await ctx.editMessageText(topicsText, {
 					parse_mode: 'HTML',
-					reply_markup: neuralTopicsKeyboard(), // 👈 оставляем клавиатуру ниже
+					reply_markup: neuralTopicsKeyboard(),
 				});
 				break;
 			}
@@ -356,7 +353,6 @@ export function registerAdminPanel(bot: Bot<Context>) {
 					}
 				}
 
-
 				if (data.startsWith('model_')) {
 					const modelId = data.replace('model_', '');
 
@@ -379,9 +375,7 @@ export function registerAdminPanel(bot: Bot<Context>) {
 				break;
 		}
 
-		// Вызываем answerCallbackQuery только для обработанных админских callback'ов
 		await ctx.answerCallbackQuery();
-		// Не вызываем next(), так как мы обработали callback
 	});
 
 	bot.command('neural_stats', async ctx => {
