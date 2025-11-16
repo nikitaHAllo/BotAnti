@@ -4,6 +4,9 @@ import { dbPromise } from './db.js';
 
 const NEURAL_API_URL = 'http://10.8.0.24:11434/v1/chat/completions';
 
+const DEFAULT_PROMPT_CONDITION =
+	'\n\nТвой ответ это твоя уверенность числом от 0 до 100, где 0 это в тексте нет упоминаний из категорий, а 100 в тексте точно есть что-то из категорий.';
+
 export const AVAILABLE_MODELS = [
 	'qwen2.5-coder:7b',
 	'qwen3:30b',
@@ -53,12 +56,14 @@ export async function analyzeWithNeural(
 			message.substring(0, 100)
 		);
 
+		const enhancedSystemPrompt = topic.systemPrompt + DEFAULT_PROMPT_CONDITION;
+
 		const response = await axios.post(
 			NEURAL_API_URL,
 			{
 				model: currentModel,
 				messages: [
-					{ role: 'system', content: topic.systemPrompt },
+					{ role: 'system', content: enhancedSystemPrompt },
 					{ role: 'user', content: `Сообщение для анализа: "${message}"` },
 				],
 				temperature: 0,

@@ -30,6 +30,12 @@ import {
 	TOPICS,
 	getTopicsByPriority,
 } from './neural.js';
+import {
+	topicCreationStates,
+	setTopicCreationState,
+	getTopicCreationState,
+	TopicCreationState,
+} from './state.js';
 
 export async function initAdminDB() {
 	const profanity = await getWords('profanity_words');
@@ -118,16 +124,19 @@ function neuralTopicsKeyboard() {
 	const keyboard = new InlineKeyboard();
 	const sortedTopics = getTopicsByPriority();
 
-	sortedTopics.forEach((topic, index) => {
+	sortedTopics.forEach(topic => {
 		const label = `${topic.enabled ? '✅' : '❌'} ${topic.name} (${
 			topic.priority
 		})`;
 		const callbackData = `topic_${topic.name}`;
-		keyboard.text(label, callbackData);
+		const deleteCallbackData = `delete_topic_${topic.name}`;
 
-		if (index % 2 === 1) keyboard.row();
+		keyboard.text(label, callbackData);
+		keyboard.text('🗑️', deleteCallbackData);
+		keyboard.row();
 	});
 
+	keyboard.row().text('➕ Добавить топик', 'add_topic_button');
 	keyboard.row().text('⬅️ Назад', 'back_to_admin');
 	return keyboard;
 }
@@ -170,10 +179,16 @@ export function registerAdminPanel(bot: Bot<Context>) {
 			'show_commands',
 			'back_to_admin',
 			'neural_topics',
+			'add_topic_button',
+			'cancel_add_topic',
+			'confirm_delete_topic',
+			'cancel_delete_topic',
 		];
 		const isAdminCallback =
 			adminCallbacks.includes(data) ||
 			data.startsWith('topic_') ||
+			data.startsWith('delete_topic_') ||
+			data.startsWith('confirm_delete_topic_') ||
 			data.startsWith('model_');
 
 		if (!isAdminCallback) {
@@ -300,9 +315,13 @@ export function registerAdminPanel(bot: Bot<Context>) {
 			case 'neural_topics': {
 				const sortedTopics = getTopicsByPriority();
 				if (sortedTopics.length === 0) {
+					const keyboard = new InlineKeyboard()
+						.text('➕ Добавить топик', 'add_topic_button')
+						.row()
+						.text('⬅️ Назад', 'back_to_admin');
 					await ctx.editMessageText(
-						'🧠 В базе пока нет тематик. Добавь их через /add_topic.',
-						{ reply_markup: backToAdminKeyboard() }
+						'🧠 В базе пока нет тематик. Добавь их через кнопку ниже или команду /add_topic.',
+						{ reply_markup: keyboard }
 					);
 					break;
 				}
@@ -323,8 +342,91 @@ export function registerAdminPanel(bot: Bot<Context>) {
 				break;
 			}
 
+			case 'add_topic_button': {
+				if (!ctx.from) break;
+				setTopicCreationState(ctx.from.id, { step: 'name' });
+				const cancelKeyboard = new InlineKeyboard().text(
+					'❌ Отмена',
+					'cancel_add_topic'
+				);
+				await ctx.editMessageText(
+					'➕ Добавление новой тематики\n\n📝 Шаг 1/4: Введите имя тематики:',
+					{ reply_markup: cancelKeyboard }
+				);
+				break;
+			}
+
+			case 'cancel_add_topic': {
+				if (!ctx.from) break;
+				setTopicCreationState(ctx.from.id, null);
+				await ctx.editMessageText('❌ Добавление топика отменено.', {
+					reply_markup: backToAdminKeyboard(),
+				});
+				break;
+			}
+
 			default:
-				if (data.startsWith('topic_')) {
+				if (data.startsWith('delete_topic_')) {
+					const topicName = data.replace('delete_topic_', '');
+					const topic = TOPICS.find(t => t.name === topicName);
+					if (topic) {
+						const confirmKeyboard = new InlineKeyboard()
+							.text('✅ Да, удалить', `confirm_delete_topic_${topicName}`)
+							.text('❌ Отмена', 'cancel_delete_topic')
+							.row()
+							.text('⬅️ Назад к темам', 'neural_topics');
+
+						await ctx.editMessageText(
+							`🗑️ Подтверждение удаления\n\n` +
+								`Вы уверены, что хотите удалить тематику <b>"${topicName}"</b>?\n\n` +
+								`<b>Описание:</b> ${topic.systemPrompt.slice(0, 150)}${
+									topic.systemPrompt.length > 150 ? '…' : ''
+								}\n\n` +
+								`⚠️ Это действие нельзя отменить!`,
+							{
+								parse_mode: 'HTML',
+								reply_markup: confirmKeyboard,
+							}
+						);
+					}
+				} else if (data.startsWith('confirm_delete_topic_')) {
+					const topicName = data.replace('confirm_delete_topic_', '');
+					const topic = TOPICS.find(t => t.name === topicName);
+
+					if (!topic) {
+						await ctx.answerCallbackQuery({
+							text: 'Тематика не найдена',
+							show_alert: true,
+						});
+						return;
+					}
+
+					const db = await dbPromise;
+					const result = await db.run(`DELETE FROM topics WHERE name = ?`, [
+						topicName,
+					]);
+
+					const index = TOPICS.findIndex(t => t.name === topicName);
+					if (index !== -1) {
+						TOPICS.splice(index, 1);
+					}
+
+					if ((result.changes ?? 0) > 0) {
+						await ctx.editMessageText(
+							`✅ Тематика "${topicName}" успешно удалена!`,
+							{ reply_markup: neuralTopicsKeyboard() }
+						);
+					} else {
+						await ctx.editMessageText(
+							`⚠️ Тематика "${topicName}" не найдена в базе, но удалена из памяти.`,
+							{ reply_markup: neuralTopicsKeyboard() }
+						);
+					}
+				} else if (data === 'cancel_delete_topic') {
+					await ctx.editMessageText('❌ Удаление отменено.', {
+						reply_markup: neuralTopicsKeyboard(),
+					});
+				} else if (data.startsWith('topic_')) {
 					const topicName = data.replace('topic_', '');
 					const topic = TOPICS.find(t => t.name === topicName);
 					if (topic) {
@@ -613,6 +715,158 @@ ${description}
 			await ctx.reply(
 				`⚠️ Тематика "${name}" не найдена в базе, но удалена из памяти.`
 			);
+		}
+	});
+
+	bot.on('message', async (ctx, next) => {
+		if (!ctx.from || !ADMINS.includes(ctx.from.id)) {
+			return next();
+		}
+
+		if (ctx.chat.type !== 'private') {
+			return next();
+		}
+
+		if (ctx.message?.text?.startsWith('/')) {
+			return next();
+		}
+
+		if (ctx.message?.document) {
+			return next();
+		}
+
+		const state = getTopicCreationState(ctx.from.id);
+		if (!state) {
+			return next();
+		}
+
+		const text = ctx.message?.text || ctx.message?.caption || '';
+		if (!text.trim()) {
+			await ctx.reply('❌ Пожалуйста, введите текст.');
+			return;
+		}
+
+		const cancelKeyboard = new InlineKeyboard().text(
+			'❌ Отмена',
+			'cancel_add_topic'
+		);
+
+		switch (state.step) {
+			case 'name': {
+				const name = text.trim().toLowerCase();
+				if (TOPICS.find(t => t.name === name)) {
+					await ctx.reply(
+						`⚠️ Тематика "${name}" уже существует. Введите другое имя:`,
+						{ reply_markup: cancelKeyboard }
+					);
+					return;
+				}
+				setTopicCreationState(ctx.from.id, {
+					...state,
+					name,
+					step: 'description',
+				});
+				await ctx.reply(
+					'✅ Имя сохранено!\n\n📝 Шаг 2/4: Введите описание тематики:',
+					{ reply_markup: cancelKeyboard }
+				);
+				break;
+			}
+
+			case 'description': {
+				setTopicCreationState(ctx.from.id, {
+					...state,
+					description: text.trim(),
+					step: 'prompt',
+				});
+				await ctx.reply(
+					'✅ Описание сохранено!\n\n📝 Шаг 3/4: Введите промт для нейросети:',
+					{ reply_markup: cancelKeyboard }
+				);
+				break;
+			}
+
+			case 'prompt': {
+				setTopicCreationState(ctx.from.id, {
+					...state,
+					prompt: text.trim(),
+					step: 'priority',
+				});
+				await ctx.reply(
+					'✅ Промт сохранён!\n\n📝 Шаг 4/4: Введите приоритет (число, например: 1):',
+					{ reply_markup: cancelKeyboard }
+				);
+				break;
+			}
+
+			case 'priority': {
+				const priority = parseInt(text.trim(), 10);
+				if (isNaN(priority) || priority < 1) {
+					await ctx.reply(
+						'❌ Приоритет должен быть числом больше 0. Введите приоритет:',
+						{ reply_markup: cancelKeyboard }
+					);
+					return;
+				}
+
+				const { name, description, prompt } = state;
+				if (!name || !description) {
+					await ctx.reply(
+						'❌ Ошибка: не все данные заполнены. Начните заново.'
+					);
+					setTopicCreationState(ctx.from.id, null);
+					return;
+				}
+
+				const db = await dbPromise;
+
+				await db.run(`
+					CREATE TABLE IF NOT EXISTS topics (
+						id INTEGER PRIMARY KEY AUTOINCREMENT,
+						name TEXT UNIQUE,
+						description TEXT,
+						system_prompt TEXT,
+						priority INTEGER,
+						enabled INTEGER DEFAULT 1
+					)
+				`);
+
+				const systemPrompt =
+					prompt ||
+					`Ты — анализатор темы "${name}". 
+Твоя задача — определить, относится ли сообщение к следующему описанию:
+${description}
+
+Если относится — ответь "ДА", если нет — ответь "НЕТ".`;
+
+				await db.run(
+					`INSERT OR REPLACE INTO topics (name, description, system_prompt, priority, enabled)
+					 VALUES (?, ?, ?, ?, 1)`,
+					[name, description, systemPrompt, priority]
+				);
+
+				TOPICS.push({
+					name,
+					systemPrompt,
+					keywords: [],
+					priority,
+					enabled: true,
+				});
+
+				setTopicCreationState(ctx.from.id, null);
+
+				await ctx.reply(
+					`✅ Тематика успешно добавлена!\n\n` +
+						`• Название: ${name}\n` +
+						`• Описание: ${description}\n` +
+						`• Приоритет: ${priority}\n` +
+						`• Промт: ${systemPrompt.slice(0, 100)}${
+							systemPrompt.length > 100 ? '...' : ''
+						}`,
+					{ reply_markup: backToAdminKeyboard() }
+				);
+				break;
+			}
 		}
 	});
 }
